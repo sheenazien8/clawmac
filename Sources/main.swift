@@ -439,13 +439,13 @@ class NativeBridgeServer: ObservableObject {
             }
         }
         
-        print("📤 Direct chat handler - Forwarding to OpenClaw")
+        print("📤 Direct chat handler - Forwarding to Clawmac")
         
-        // Forward to OpenClaw CLI
-        forwardToOpenClaw(message: message, clientId: clientId) { responseText in
+        // Forward to Clawmac CLI
+        forwardToClawmac(message: message, clientId: clientId) { responseText in
             let response: [String: Any] = [
                 "success": true,
-                "response": responseText ?? "No response from OpenClaw"
+                "response": responseText ?? "No response from Clawmac"
             ]
             self.sendResponse(connection, status: 200, body: response)
         }
@@ -467,19 +467,19 @@ class NativeBridgeServer: ObservableObject {
             }
         }
         
-        // Forward to OpenClaw CLI
-        print("📤 Forwarding message to OpenClaw: \(message)")
-        forwardToOpenClaw(message: message, clientId: clientId) { responseText in
-            print("📥 OpenClaw response received: \(responseText?.prefix(100) ?? "nil")...")
+        // Forward to Clawmac CLI
+        print("📤 Forwarding message to Clawmac: \(message)")
+        forwardToClawmac(message: message, clientId: clientId) { responseText in
+            print("📥 Clawmac response received: \(responseText?.prefix(100) ?? "nil")...")
             let response: [String: Any] = [
                 "success": true,
-                "response": responseText ?? "No response from OpenClaw"
+                "response": responseText ?? "No response from Clawmac"
             ]
             self.sendResponse(connection, status: 200, body: response)
         }
     }
     
-    private func forwardToOpenClaw(message: String, clientId: String?, completion: @escaping (String?) -> Void) {
+    private func forwardToClawmac(message: String, clientId: String?, completion: @escaping (String?) -> Void) {
         // Find session key
         let sessionKey: String
         if let clientId = clientId,
@@ -493,9 +493,9 @@ class NativeBridgeServer: ObservableObject {
             return
         }
         
-        print("🤖 Calling OpenClaw with sessionKey: \(sessionKey)")
+        print("🤖 Calling Clawmac with sessionKey: \(sessionKey)")
         
-        // Call OpenClaw CLI
+        // Call Clawmac CLI
         let task = Process()
         task.launchPath = "/Users/sheenazien8/.nvm/versions/node/v22.19.0/bin/openclaw"
         task.arguments = ["agent", "--session-key", sessionKey, "-m", message, "--json"]
@@ -513,18 +513,18 @@ class NativeBridgeServer: ObservableObject {
             let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             
             if let errorOutput = String(data: errorData, encoding: .utf8), !errorOutput.isEmpty {
-                print("⚠️ OpenClaw stderr: \(errorOutput)")
+                print("⚠️ Clawmac stderr: \(errorOutput)")
             }
             
             if let output = String(data: data, encoding: .utf8) {
-                print("✅ OpenClaw response length: \(output.count)")
+                print("✅ Clawmac response length: \(output.count)")
                 completion(output)
             } else {
-                print("❌ Failed to decode OpenClaw output")
+                print("❌ Failed to decode Clawmac output")
                 completion(nil)
             }
         } catch {
-            print("❌ OpenClaw execution error: \(error)")
+            print("❌ Clawmac execution error: \(error)")
             completion(nil)
         }
     }
@@ -869,7 +869,7 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
                 
                 print("📥 response field length: \(responseJsonString.count)")
                 
-                // Parse the nested JSON response from OpenClaw CLI
+                // Parse the nested JSON response from Clawmac CLI
                 let finalText: String
                 if let responseData = responseJsonString.data(using: .utf8),
                    let responseJson = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
@@ -957,7 +957,7 @@ struct ChatView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "message.fill")
                         .foregroundColor(pairingManager.isPaired ? .blue : .orange)
-                    Text("OpenClaw")
+                    Text("Clawmac")
                         .font(.headline)
                 }
                 
@@ -1215,10 +1215,10 @@ struct StartPairingView: View {
                 .font(.system(size: 64))
                 .foregroundColor(.orange)
             
-            Text("Hubungkan ke OpenClaw")
+            Text("Hubungkan ke Clawmac")
                 .font(.headline)
             
-            Text("Klik tombol di bawah untuk menghubungkan aplikasi ini dengan OpenClaw.")
+            Text("Klik tombol di bawah untuk menghubungkan aplikasi ini dengan Clawmac.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -1255,7 +1255,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem?.button {
             // Use a distinctive AI-themed SF Symbol
             let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-            let image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "OpenClaw")
+            let image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "Clawmac")
             
             if let img = image?.withSymbolConfiguration(config) {
                 img.isTemplate = true  // Follow system appearance
@@ -1286,7 +1286,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct OpenClawMenuBarApp: App {
+struct ClawmacMenuBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     var body: some Scene {
