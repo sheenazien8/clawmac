@@ -1016,26 +1016,67 @@ struct ChatView: View {
             
             Divider()
             
-            HStack(spacing: 8) {
+            // Enhanced Input Bar - larger size, macOS standard colors
+            HStack(spacing: 12) {
+                // Voice button
                 Button(action: { viewModel.toggleRecording() }) {
                     Image(systemName: viewModel.isRecording ? "stop.fill" : "mic.fill")
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(viewModel.isRecording ? .red : .secondary)
+                        .frame(width: 40, height: 40)
+                        .background(
+                            Circle()
+                                .fill(Color(.controlBackgroundColor))
+                        )
+                        .overlay(
+                            Circle()
+                                .stroke(Color(.separatorColor), lineWidth: 0.5)
+                        )
                 }
+                .buttonStyle(PlainButtonStyle())
                 
-                TextField("Ketik pesan...", text: $viewModel.inputText)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .onSubmit { viewModel.sendMessage(clientId: pairingManager.clientId) }
+                // Text field - larger, rounded
+                HStack {
+                    TextField("Ketik pesan...", text: $viewModel.inputText)
+                        .font(.system(size: 14))
+                        .textFieldStyle(PlainTextFieldStyle())
+                        .onSubmit { viewModel.sendMessage(clientId: pairingManager.clientId) }
+                }
+                .frame(height: 44)
+                .padding(.horizontal, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 22)
+                        .fill(Color(.textBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(Color(.separatorColor), lineWidth: 0.5)
+                )
                 
+                // Send button - larger, circle
                 Button(action: { viewModel.sendMessage(clientId: pairingManager.clientId) }) {
-                    Image(systemName: "arrow.up")
-                        .foregroundColor(.white)
-                        .padding(8)
-                        .background(Color.blue)
-                        .clipShape(Circle())
+                    ZStack {
+                        Circle()
+                            .fill(viewModel.inputText.isEmpty ? Color(.controlBackgroundColor) : Color.blue)
+                            .frame(width: 44, height: 44)
+                        
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(viewModel.inputText.isEmpty ? .secondary : .white)
+                    }
                 }
+                .buttonStyle(PlainButtonStyle())
                 .disabled(viewModel.inputText.isEmpty)
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color(.windowBackgroundColor))
+            .overlay(
+                Rectangle()
+                    .fill(Color(.separatorColor))
+                    .frame(height: 0.5),
+                alignment: .top
+            )
         }
     }
 }
