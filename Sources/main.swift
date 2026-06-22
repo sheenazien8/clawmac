@@ -1212,8 +1212,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
-            // Use OpenClaw themed icon
-            button.image = AppIcon.menuBarIcon()
+            // Use a distinctive AI-themed SF Symbol
+            let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+            let image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "OpenClaw")
+            
+            if let img = image?.withSymbolConfiguration(config) {
+                img.isTemplate = true  // Follow system appearance
+                button.image = img
+            }
+            
             button.action = #selector(togglePopover)
             button.target = self
         }
