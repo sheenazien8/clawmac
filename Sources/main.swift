@@ -822,11 +822,15 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 120
+        // Disable automatic cursor change
+        config.waitsForConnectivity = false
         let session = URLSession(configuration: config)
         
-        session.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
+        // Run on background thread to avoid blocking UI
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let task = session.dataTask(with: request) { data, response, error in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
                 
                 print("📥 ChatViewModel.sendMessage - Response received")
                 print("📥 error: \(String(describing: error))")
@@ -888,7 +892,8 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
                 self.messages.append(Message(role: .assistant, content: finalText))
                 self.isLoading = false
             }
-        }.resume()
+            task.resume()
+        }
     }
     
     func clearChat() {
@@ -952,7 +957,7 @@ struct ChatView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header with close button
+            // Header
             HStack {
                 HStack(spacing: 6) {
                     Image(systemName: "message.fill")
@@ -980,16 +985,6 @@ struct ChatView: View {
                         Image(systemName: "hourglass")
                             .foregroundColor(.orange)
                     }
-                    
-                    // Close button
-                    Button(action: {
-                        NSApplication.shared.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(PlainButtonStyle())
                 }
             }
             .padding()
