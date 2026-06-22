@@ -828,8 +828,8 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
         
         // Run on background thread to avoid blocking UI
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let task = session.dataTask(with: request) { data, response, error in
-                DispatchQueue.main.async { [weak self] in
+            let task = session.dataTask(with: request) { [weak self] data, response, error in
+                DispatchQueue.main.async {
                     guard let self = self else { return }
                 
                 print("📥 ChatViewModel.sendMessage - Response received")
