@@ -1212,8 +1212,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "message.circle.fill", accessibilityDescription: "OpenClaw")
-            button.contentTintColor = NSColor(red: 0.957, green: 0.302, blue: 0.302, alpha: 1.0) // #ff4d4d
+            // Use SF Symbol with proper macOS menu bar styling
+            let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+            let image = NSImage(systemSymbolName: "bubble.left.fill", accessibilityDescription: "OpenClaw")
+            
+            // For Big Sur+, we need to handle template properly
+            if let img = image?.withSymbolConfiguration(config) {
+                img.isTemplate = true  // This makes it follow system appearance
+                button.image = img
+            }
+            
+            // On macOS, template images automatically get the right color
+            // (white in dark menu bar, black in light menu bar)
             button.action = #selector(togglePopover)
             button.target = self
         }
