@@ -311,8 +311,12 @@ class NativeBridgeServer: ObservableObject {
             print("⚠️ POST request but no body separator found")
         }
         
-        DispatchQueue.main.async { [weak self] in
-            self?.routeRequest(method: method, path: path, body: body, connection: connection)
+        if path == "/api/macos/chat" {
+            routeRequest(method: method, path: path, body: body, connection: connection)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.routeRequest(method: method, path: path, body: body, connection: connection)
+            }
         }
     }
     
@@ -505,10 +509,7 @@ class NativeBridgeServer: ObservableObject {
         task.standardOutput = pipe
         task.standardError = errorPipe
         
-        do {
-            try task.run()
-            task.waitUntilExit()
-            
+        task.terminationHandler = { process in
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             
@@ -523,6 +524,10 @@ class NativeBridgeServer: ObservableObject {
                 print("❌ Failed to decode Clawmac output")
                 completion(nil)
             }
+        }
+        
+        do {
+            try task.run()
         } catch {
             print("❌ Clawmac execution error: \(error)")
             completion(nil)
@@ -891,6 +896,7 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
                 
                 self.messages.append(Message(role: .assistant, content: finalText))
                 self.isLoading = false
+            }
             }
             task.resume()
         }
