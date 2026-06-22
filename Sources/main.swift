@@ -1212,17 +1212,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "message.fill", accessibilityDescription: "OpenClaw")
+            button.image = NSImage(systemSymbolName: "message.circle.fill", accessibilityDescription: "OpenClaw")
+            button.contentTintColor = NSColor(red: 0.957, green: 0.302, blue: 0.302, alpha: 1.0) // #ff4d4d
             button.action = #selector(togglePopover)
             button.target = self
         }
         
         // Create popover
-        let chatView = ChatView(viewModel: chatViewModel, pairingManager: pairingManager)
+        let enhancedChatView = EnhancedChatView(viewModel: chatViewModel, pairingManager: pairingManager)
         popover = NSPopover()
-        popover?.contentSize = NSSize(width: 380, height: 600)
+        popover?.contentSize = NSSize(width: 400, height: 650)
         popover?.behavior = .transient
-        popover?.contentViewController = NSHostingController(rootView: chatView)
+        popover?.contentViewController = NSHostingController(rootView: enhancedChatView)
     }
     
     @objc func togglePopover() {
@@ -1232,18 +1233,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             }
-        }
-    }
-}
-
-// MARK: - App Entry
-@main
-struct OpenClawMenuBarApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
-    var body: some Scene {
-        Settings {
-            EmptyView()
         }
     }
 }
