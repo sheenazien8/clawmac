@@ -966,8 +966,14 @@ struct ChatView: View {
             // Header
             HStack {
                 HStack(spacing: 6) {
-                    Image(systemName: "message.fill")
-                        .foregroundColor(pairingManager.isPaired ? .blue : .orange)
+                    if let url = Bundle.module.url(forResource: "OpenClawLogo", withExtension: "svg"),
+                       let logo = NSImage(contentsOf: url) {
+                        Image(nsImage: logo)
+                            .resizable()
+                            .frame(width: 18, height: 18)
+                    } else {
+                        Image(systemName: "message.fill")
+                    }
                     Text("Clawmac")
                         .font(.headline)
                 }
@@ -1318,15 +1324,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
-            // Use a distinctive AI-themed SF Symbol
-            let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-            let image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "Clawmac")
-            
-            if let img = image?.withSymbolConfiguration(config) {
-                img.isTemplate = true  // Follow system appearance
-                button.image = img
+            if let url = Bundle.module.url(forResource: "OpenClawLogo", withExtension: "svg"),
+               let image = NSImage(contentsOf: url) {
+                image.size = NSSize(width: 18, height: 18)
+                image.isTemplate = true
+                image.accessibilityDescription = "Clawmac"
+                button.image = image
             }
-            
+
             button.action = #selector(togglePopover)
             button.target = self
         }

@@ -12,6 +12,9 @@ let package = Package(
             name: "OpenClawMenuBar",
             dependencies: [],
             path: "Sources",
+            resources: [
+                .process("Resources")
+            ],
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency"),
                 .define("SWIFT_PACKAGE"),
