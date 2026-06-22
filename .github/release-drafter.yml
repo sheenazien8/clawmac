@@ -1,0 +1,26 @@
+name-template: 'Clawmac v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+version-resolver:
+  major:
+    labels: ['breaking', 'major']
+  minor:
+    labels: ['feature', 'enhancement', 'minor']
+  patch:
+    labels: ['bug', 'fix', 'docs', 'chore', 'patch']
+  default: patch
+categories:
+  - title: 🚀 Features
+    labels: ['feature', 'enhancement']
+  - title: 🐛 Bug Fixes
+    labels: ['bug', 'fix']
+  - title: 📝 Documentation
+    labels: ['docs']
+  - title: 🧰 Maintenance
+    labels: ['chore', 'refactor', 'deps']
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+template: |
+  ## Changes
+
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION

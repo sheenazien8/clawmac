@@ -493,45 +493,202 @@ class NativeBridgeServer: ObservableObject {
             sessionKey = defaultClient.sessionKey
         } else {
             print("❌ No approved clients found")
-            completion(nil)
+            completion("No approved Clawmac client. Re-pair first.")
             return
         }
-        
+
         print("🤖 Calling Clawmac with sessionKey: \(sessionKey)")
-        
-        // Call Clawmac CLI
+
+        let openclawPath = Self.resolveOpenClawPath()
+        let baseArgs = ["agent", "--session-key", sessionKey, "-m", message, "--json"]
+        let launch = Self.resolveLaunchCommand(openclawPath: openclawPath, baseArgs: baseArgs)
+
+        if launch.usedNodeWrapper {
+            print("🔁 openclaw is a Node script — invoking node directly (\(launch.launchPath))")
+        }
+        print("🚀 exec: \(launch.launchPath) \(launch.args.joined(separator: " "))")
+
         let task = Process()
-        task.launchPath = "/Users/sheenazien8/.nvm/versions/node/v22.19.0/bin/openclaw"
-        task.arguments = ["agent", "--session-key", sessionKey, "-m", message, "--json"]
-        
+        task.launchPath = launch.launchPath
+        task.arguments = launch.args
+        task.environment = Self.spawnEnvironment(for: openclawPath)
+
         let pipe = Pipe()
         let errorPipe = Pipe()
         task.standardOutput = pipe
         task.standardError = errorPipe
-        
+
         task.terminationHandler = { process in
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            
-            if let errorOutput = String(data: errorData, encoding: .utf8), !errorOutput.isEmpty {
-                print("⚠️ Clawmac stderr: \(errorOutput)")
+
+            let stderrText = String(data: errorData, encoding: .utf8) ?? ""
+            let stdoutText = String(data: data, encoding: .utf8) ?? ""
+
+            if !stderrText.isEmpty {
+                print("⚠️ Clawmac stderr: \(stderrText)")
             }
-            
-            if let output = String(data: data, encoding: .utf8) {
-                print("✅ Clawmac response length: \(output.count)")
-                completion(output)
+
+            let exitCode = process.terminationStatus
+            if exitCode != 0 {
+                let trimmed = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let reason = trimmed.isEmpty
+                    ? "exit code \(exitCode)"
+                    : trimmed
+                print("❌ Clawmac failed: \(reason)")
+                completion("⚠️ Clawmac error (\(reason))")
+                return
+            }
+
+            if !stdoutText.isEmpty {
+                print("✅ Clawmac response length: \(stdoutText.count)")
+                completion(stdoutText)
             } else {
-                print("❌ Failed to decode Clawmac output")
-                completion(nil)
+                print("❌ Clawmac produced no output")
+                completion("⚠️ Clawmac returned no output")
             }
         }
-        
+
         do {
             try task.run()
         } catch {
             print("❌ Clawmac execution error: \(error)")
-            completion(nil)
+            completion("⚠️ Could not launch Clawmac at \(openclawPath): \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - openclaw discovery
+
+    private static let openclawPathDefaultsKey = "openclawPath"
+
+    private static func resolveOpenClawPath() -> String {
+        let fm = FileManager.default
+
+        if let custom = UserDefaults.standard.string(forKey: openclawPathDefaultsKey),
+           fm.isExecutableFile(atPath: custom) {
+            print("📍 openclawPath from UserDefaults: \(custom)")
+            return custom
+        }
+
+        let home = fm.homeDirectoryForCurrentUser.path
+        let candidates = [
+            "\(home)/.nvm/versions/node/current/bin/openclaw",
+            "\(home)/.nvm/versions/node/v22.19.0/bin/openclaw",
+            "\(home)/.local/bin/openclaw",
+            "/usr/local/bin/openclaw",
+            "/opt/homebrew/bin/openclaw",
+        ]
+        for c in candidates where fm.isExecutableFile(atPath: c) {
+            return c
+        }
+
+        let envPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for dir in envPath.split(separator: ":") {
+            let c = "\(dir)/openclaw"
+            if fm.isExecutableFile(atPath: c) { return c }
+        }
+
+        return "\(home)/.nvm/versions/node/v22.19.0/bin/openclaw"
+    }
+
+    private struct LaunchCommand {
+        let launchPath: String
+        let args: [String]
+        let usedNodeWrapper: Bool
+    }
+
+    private static func resolveLaunchCommand(openclawPath: String, baseArgs: [String]) -> LaunchCommand {
+        let fm = FileManager.default
+
+        guard let shebang = readFirstLine(of: openclawPath) else {
+            return LaunchCommand(launchPath: openclawPath, args: baseArgs, usedNodeWrapper: false)
+        }
+
+        let lower = shebang.lowercased()
+
+        // #!/usr/bin/env node  (or any *env* node*)  → look up node, invoke node + script path
+        if shebang.hasPrefix("#!"),
+           lower.contains("env"),
+           lower.contains("node") {
+            if let nodePath = findNodeBinary(near: openclawPath) {
+                return LaunchCommand(launchPath: nodePath, args: [openclawPath] + baseArgs, usedNodeWrapper: true)
+            }
+        }
+
+        // #!/path/to/node  (no env) → use that interpreter directly
+        if shebang.hasPrefix("#!") {
+            let parts = shebang.dropFirst(2).split(separator: " ").map(String.init)
+            if let first = parts.first, lower.contains("node"),
+               fm.isExecutableFile(atPath: first) {
+                var args = [openclawPath] + baseArgs
+                if parts.count > 1 {
+                    args = parts.dropFirst() + args
+                }
+                return LaunchCommand(launchPath: first, args: args, usedNodeWrapper: true)
+            }
+        }
+
+        // Compiled binary or non-Node script → run directly
+        return LaunchCommand(launchPath: openclawPath, args: baseArgs, usedNodeWrapper: false)
+    }
+
+    private static func findNodeBinary(near openclawPath: String) -> String? {
+        let fm = FileManager.default
+
+        // 1. Beside the openclaw script (nvm installs put both in the same bin/)
+        let scriptDir = (openclawPath as NSString).deletingLastPathComponent
+        let beside = "\(scriptDir)/node"
+        if fm.isExecutableFile(atPath: beside) { return beside }
+
+        // 2. Common system locations
+        let candidates = [
+            "/usr/local/bin/node",
+            "/opt/homebrew/bin/node",
+            "/usr/bin/node",
+        ]
+        for c in candidates where fm.isExecutableFile(atPath: c) { return c }
+
+        // 3. Walk inherited PATH
+        let envPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for dir in envPath.split(separator: ":") {
+            let c = "\(dir)/node"
+            if fm.isExecutableFile(atPath: c) { return c }
+        }
+        return nil
+    }
+
+    private static func readFirstLine(of path: String) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else {
+            return nil
+        }
+        defer { try? handle.close() }
+        let data = handle.readData(ofLength: 1024)
+        guard var str = String(data: data, encoding: .utf8) else { return nil }
+        if let nl = str.firstIndex(of: "\n") {
+            str = String(str[..<nl])
+        }
+        let trimmed = str.trimmingCharacters(in: CharacterSet.whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func spawnEnvironment(for openclawPath: String) -> [String: String] {
+        let env = ProcessInfo.processInfo.environment
+        let scriptDir = (openclawPath as NSString).deletingLastPathComponent
+        let inheritedDirs = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+        let combined = ([scriptDir, "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            + inheritedDirs)
+            .filter { !$0.isEmpty }
+
+        var out: [String: String] = [
+            "HOME": env["HOME"] ?? NSHomeDirectory(),
+            "USER": env["USER"] ?? NSUserName(),
+            "PATH": combined.joined(separator: ":"),
+            "LANG": env["LANG"] ?? "en_US.UTF-8",
+        ]
+        for key in ["NODE_PATH", "NODE_ENV", "NVM_DIR", "NVM_BIN", "TMPDIR"] {
+            if let v = env[key] { out[key] = v }
+        }
+        return out
     }
     
     private func handleListClients(_ connection: NWConnection) {

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (unsigned .app)
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcode-select -p
+
+      - name: Cache SwiftPM artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved', 'Package.swift', 'Sources/**/*.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: swift build
+        run: swift build -c release
+
+      - name: swift test (placeholder)
+        run: |
+          if [[ -d Tests ]]; then
+            swift test
+          else
+            echo "no Tests/ directory yet — skipping"
+          fi
+
+      - name: Build .app (ad-hoc)
+        run: ./scripts/build-app.sh --no-dmg --version 0.0.0 --build-number ${{ github.run_number }}
+
+      - name: Upload unsigned .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Clawmac-app
+          path: .build/Clawmac.app
+          if-no-files-found: error
+          retention-days: 14

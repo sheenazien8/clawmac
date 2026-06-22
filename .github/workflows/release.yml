@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, package & upload (ad-hoc)
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          BUILD_NUMBER="$(git rev-list --count HEAD)"
+          echo "version=$VERSION"    >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "→ version=$VERSION build=$BUILD_NUMBER"
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Cache SwiftPM artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-spm-release-${{ hashFiles('Package.resolved', 'Package.swift', 'Sources/**/*.swift') }}
+
+      - name: swift build (release)
+        run: swift build -c release
+
+      - name: Build ad-hoc signed .app
+        run: |
+          ./scripts/build-app.sh \
+            --no-dmg \
+            --sign "-" \
+            --version "${{ steps.version.outputs.version }}" \
+            --build-number "${{ steps.version.outputs.build }}"
+
+      - name: Verify signature
+        run: |
+          codesign -dv --verbose=4 .build/Clawmac.app
+
+      - name: Stage DMG layout
+        run: |
+          mkdir -p .build/dmg-staging
+          rm -rf .build/dmg-staging/*
+          cp -R .build/Clawmac.app .build/dmg-staging/
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build DMG
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          create-dmg \
+            --volname "Clawmac" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Clawmac.app" 175 190 \
+            --app-drop-link 425 190 \
+            ".build/Clawmac-${VERSION}.dmg" .build/dmg-staging/
+
+      - name: Build ZIP
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ditto -c -k --sequesterRsrc --keepParent \
+            .build/Clawmac.app ".build/Clawmac-${VERSION}.zip"
+
+      - name: Write release body
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > .build/RELEASE.md <<EOF
+          ## Clawmac $VERSION
+
+          Download \`Clawmac-${VERSION}.dmg\`, drag **Clawmac** to Applications, launch.
+
+          > ⚠️ **Build ini ad-hoc signed (tanpa Apple Developer ID / tanpa notarization).**
+          > Saat pertama kali buka, macOS akan tampilkan pesan
+          > *"Clawmac cannot be opened because the developer cannot be verified"*.
+          > **Klik kanan → Open → Open** sekali saja untuk bypass. Setelah itu jalan normal.
+
+          Alternatif via Terminal kalau gak mau klik-klik:
+          \`\`\`bash
+          xattr -dr com.apple.quarantine /Applications/Clawmac.app
+          open /Applications/Clawmac
+          \`\`\`
+
+          Build ini gratis (tanpa biaya Apple Developer Program \$99/tahun).
+          Untuk distribusi publik tanpa prompt Gatekeeper, lihat
+          [\`docs/RELEASE.md\`](https://github.com/${{ github.repository }}/blob/main/docs/RELEASE.md).
+          EOF
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Clawmac ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body_path: .build/RELEASE.md
+          files: |
+            .build/Clawmac-${{ steps.version.outputs.version }}.dmg
+            .build/Clawmac-${{ steps.version.outputs.version }}.zip
+          fail_on_unmatched_files: true

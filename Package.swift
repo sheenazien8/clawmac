@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClawMac",
+    name: "Clawmac",
     platforms: [
         .macOS(.v14)
     ],
     dependencies: [],
     targets: [
         .executableTarget(
-            name: "ClawMac",
+            name: "Clawmac",
             dependencies: [],
             path: "Sources",
             resources: [
