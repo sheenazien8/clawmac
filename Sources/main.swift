@@ -960,7 +960,7 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
 struct ChatView: View {
     @ObservedObject var viewModel: ChatViewModel
     @ObservedObject var pairingManager: PairingManager
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -1264,6 +1264,46 @@ struct StartPairingView: View {
 }
 
 // MARK: - App Delegate
+
+final class ChatHostingController: NSHostingController<ChatView> {
+    override func viewDidAppear() {
+        super.viewDidAppear()
+
+        guard let window = view.window else { return }
+        window.makeKey()
+
+        func attemptFocus(attempt: Int) {
+            guard attempt < 5 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1 * Double(attempt + 1)) { [weak self] in
+                guard let self = self, let window = self.view.window, window.isVisible else { return }
+                window.makeKey()
+                if let textField = Self.findTextField(in: self.view) {
+                    if window.makeFirstResponder(textField) {
+                        print("✅ Autofocus succeeded on attempt \(attempt + 1)")
+                    } else {
+                        print("⚠️ makeFirstResponder returned false on attempt \(attempt + 1)")
+                    }
+                } else {
+                    print("⚠️ NSTextField not found on attempt \(attempt + 1)")
+                    if attempt < 4 {
+                        attemptFocus(attempt: attempt + 1)
+                    }
+                }
+            }
+        }
+
+        attemptFocus(attempt: 0)
+    }
+
+    private static func findTextField(in view: NSView) -> NSTextField? {
+        if let textField = view as? NSTextField { return textField }
+        for subview in view.subviews {
+            if let found = findTextField(in: subview) { return found }
+        }
+        return nil
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popover: NSPopover?
@@ -1295,8 +1335,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let chatView = ChatView(viewModel: chatViewModel, pairingManager: pairingManager)
         popover = NSPopover()
         popover?.contentSize = NSSize(width: 380, height: 600)
-        popover?.behavior = .semitransient
-        popover?.contentViewController = NSHostingController(rootView: chatView)
+        popover?.behavior = .transient
+        popover?.contentViewController = ChatHostingController(rootView: chatView)
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppWillResignActive),
+            name: NSApplication.willResignActiveNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleAppWillResignActive() {
+        if popover?.isShown == true {
+            popover?.performClose(nil)
+        }
+    }
+
+    func applicationWillResignActive(_ notification: Notification) {
+        if popover?.isShown == true {
+            popover?.performClose(nil)
+        }
     }
     
     @objc func togglePopover() {
@@ -1304,6 +1363,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if popover?.isShown == true {
                 popover?.performClose(nil)
             } else {
+                NSApp.activate(ignoringOtherApps: true)
                 popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             }
         }
