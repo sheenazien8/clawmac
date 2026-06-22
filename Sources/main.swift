@@ -1212,18 +1212,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
-            // Use SF Symbol with proper macOS menu bar styling
-            let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-            let image = NSImage(systemSymbolName: "bubble.left.fill", accessibilityDescription: "OpenClaw")
-            
-            // For Big Sur+, we need to handle template properly
-            if let img = image?.withSymbolConfiguration(config) {
-                img.isTemplate = true  // This makes it follow system appearance
-                button.image = img
-            }
-            
-            // On macOS, template images automatically get the right color
-            // (white in dark menu bar, black in light menu bar)
+            // Use OpenClaw themed icon
+            button.image = AppIcon.menuBarIcon()
             button.action = #selector(togglePopover)
             button.target = self
         }
