@@ -1108,25 +1108,15 @@ struct MessageBubble: View {
             }
             
             if message.isProcessing {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Color.gray)
-                        .frame(width: 6, height: 6)
-                    Circle()
-                        .fill(Color.gray)
-                        .frame(width: 6, height: 6)
-                    Circle()
-                        .fill(Color.gray)
-                        .frame(width: 6, height: 6)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(Color(.windowBackgroundColor))
-                .cornerRadius(14)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                )
+                TypingIndicator()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color(.windowBackgroundColor))
+                    .cornerRadius(14)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    )
             } else {
                 Text(message.content)
                     .font(.system(size: 14))
@@ -1145,6 +1135,24 @@ struct MessageBubble: View {
             
             if message.role == .assistant {
                 Spacer()
+            }
+        }
+    }
+}
+
+struct TypingIndicator: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3) { index in
+                Circle()
+                    .fill(Color.gray)
+                    .frame(width: 6, height: 6)
+                    .phaseAnimator([0, 1, 2]) { content, phase in
+                        content
+                            .scaleEffect(phase == index ? 1.3 : 1.0)
+                    } animation: { phase in
+                        .easeInOut(duration: 0.3)
+                    }
             }
         }
     }
