@@ -952,7 +952,7 @@ struct ChatView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header
+            // Header with close button
             HStack {
                 HStack(spacing: 6) {
                     Image(systemName: "message.fill")
@@ -980,6 +980,16 @@ struct ChatView: View {
                         Image(systemName: "hourglass")
                             .foregroundColor(.orange)
                     }
+                    
+                    // Close button
+                    Button(action: {
+                        NSApplication.shared.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 18))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
             }
             .padding()
@@ -1276,7 +1286,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let chatView = ChatView(viewModel: chatViewModel, pairingManager: pairingManager)
         popover = NSPopover()
         popover?.contentSize = NSSize(width: 380, height: 600)
-        popover?.behavior = .transient
+        popover?.behavior = .semitransient
         popover?.contentViewController = NSHostingController(rootView: chatView)
     }
     
