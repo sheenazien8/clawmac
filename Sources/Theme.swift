@@ -1,21 +1,21 @@
 import SwiftUI
 
-// MARK: - OpenClaw Theme
+// MARK: - macOS Standard Theme
 enum OpenClawTheme {
-    // Base Colors - Lobster Red
-    static let primaryStart = Color(hex: "#ff4d4d")
-    static let primaryEnd = Color(hex: "#991b1b")
-    static let primary = Color(hex: "#e11d48")
+    // macOS System Colors
+    static let primary = Color.accentColor  // System accent color
+    static let primaryStart = Color.blue
+    static let primaryEnd = Color.blue.opacity(0.8)
     
-    // Background
-    static let background = Color(hex: "#0a0a0f")
-    static let surface = Color(hex: "#12121a")
-    static let surfaceHighlight = Color(hex: "#1e1e2e")
+    // Background - Use system colors
+    static let background = Color(.windowBackgroundColor)
+    static let surface = Color(.controlBackgroundColor)
+    static let surfaceHighlight = Color(.textBackgroundColor)
     
-    // Text
-    static let textPrimary = Color.white
-    static let textSecondary = Color(hex: "#a1a1aa")
-    static let textMuted = Color(hex: "#71717a")
+    // Text - Use system colors
+    static let textPrimary = Color(.labelColor)
+    static let textSecondary = Color(.secondaryLabelColor)
+    static let textMuted = Color(.tertiaryLabelColor)
     
     // Gradients
     static var primaryGradient: LinearGradient {
@@ -29,8 +29,8 @@ enum OpenClawTheme {
     static var glassGradient: LinearGradient {
         LinearGradient(
             colors: [
-                Color.white.opacity(0.1),
-                Color.white.opacity(0.05)
+                Color.white.opacity(0.8),
+                Color.white.opacity(0.6)
             ],
             startPoint: .top,
             endPoint: .bottom
@@ -69,12 +69,7 @@ extension Color {
 struct GlassModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .background(.ultraThinMaterial)
-            .background(OpenClawTheme.glassGradient)
-            .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
-            )
+            .background(.thinMaterial)
             .cornerRadius(16)
     }
 }
@@ -84,7 +79,7 @@ struct GlowModifier: ViewModifier {
     
     func body(content: Content) -> some View {
         content
-            .shadow(color: color.opacity(0.3), radius: 8, x: 0, y: 4)
+            .shadow(color: color.opacity(0.2), radius: 4, x: 0, y: 2)
     }
 }
 
