@@ -778,6 +778,93 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
         }
     }
     
+    func sendMessageStreaming(clientId: String?) {
+        guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        
+        let userMessage = Message(role: .user, content: inputText)
+        messages.append(userMessage)
+        
+        let messageText = inputText
+        inputText = ""
+        isLoading = true
+        
+        // Create empty assistant message for streaming
+        let streamingMessage = Message(role: .assistant, content: "", isProcessing: false)
+        messages.append(streamingMessage)
+        let messageIndex = messages.count - 1
+        
+        // Send to local bridge
+        let url = URL(string: "http://localhost:3456/api/macos/chat")!
+        var body: [String: Any] = ["message": messageText]
+        if let clientId = clientId {
+            body["clientId"] = clientId
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 60
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        
+        let session = URLSession(configuration: .ephemeral)
+        
+        session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self = self else { return }
+            
+            DispatchQueue.main.async {
+                self.isLoading = false
+                
+                if let error = error {
+                    self.messages[messageIndex] = Message(role: .assistant, content: "Error: \(error.localizedDescription)")
+                    return
+                }
+                
+                guard let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let responseJsonString = json["response"] as? String else {
+                    self.messages[messageIndex] = Message(role: .assistant, content: "No response")
+                    return
+                }
+                
+                // Parse the nested JSON
+                let finalText: String
+                if let responseData = responseJsonString.data(using: .utf8),
+                   let responseJson = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                   let result = responseJson["result"] as? [String: Any],
+                   let payloads = result["payloads"] as? [[String: Any]],
+                   let firstPayload = payloads.first,
+                   let text = firstPayload["text"] as? String {
+                    finalText = text
+                } else {
+                    finalText = responseJsonString
+                }
+                
+                // Simulate streaming by appending characters
+                self.simulateStreaming(text: finalText, at: messageIndex)
+            }
+        }.resume()
+    }
+    
+    private func simulateStreaming(text: String, at index: Int) {
+        var currentText = ""
+        let characters = Array(text)
+        
+        func appendNext() {
+            guard currentText.count < characters.count else { return }
+            
+            currentText += String(characters[currentText.count])
+            messages[index] = Message(role: .assistant, content: currentText)
+            
+            // Schedule next character
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+                self?.simulateStreaming(text: text, at: index)
+            }
+        }
+        
+        // Start streaming
+        appendNext()
+    }
+    
     func sendMessage(clientId: String?) {
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         
@@ -1040,7 +1127,7 @@ struct ChatView: View {
                     TextField("Ketik pesan...", text: $viewModel.inputText)
                         .font(.system(size: 14))
                         .textFieldStyle(PlainTextFieldStyle())
-                        .onSubmit { viewModel.sendMessage(clientId: pairingManager.clientId) }
+                        .onSubmit { viewModel.sendMessageStreaming(clientId: pairingManager.clientId) }
                 }
                 .frame(height: 44)
                 .padding(.horizontal, 12)
@@ -1054,7 +1141,7 @@ struct ChatView: View {
                 )
                 
                 // Send button - larger, circle
-                Button(action: { viewModel.sendMessage(clientId: pairingManager.clientId) }) {
+                Button(action: { viewModel.sendMessageStreaming(clientId: pairingManager.clientId) }) {
                     ZStack {
                         Circle()
                             .fill(viewModel.inputText.isEmpty ? Color(.controlBackgroundColor) : Color.blue)
