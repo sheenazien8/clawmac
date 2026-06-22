@@ -1,0 +1,24 @@
+# Build
+.build/
+*.xcodeproj/
+*.xcworkspace/
+*.app/
+DerivedData/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+Package.resolved
+
+# Credentials
+*.pem
+*.key
