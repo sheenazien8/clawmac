@@ -16,7 +16,7 @@ AI Assistant macOS app yang menggantikan Siri - Chat langsung dengan OpenClaw da
 ### Opsi 1: Via Swift Package Manager (Recommended)
 
 ```bash
-cd /Users/sheenazien8/Documents/Code/my-project/OpenClawMenuBar
+cd /Users/sheenazien8/Documents/Code/my-project/ClawMac
 swift build
 
 # Run (requires entitlements for mic/speech permissions)
@@ -26,9 +26,9 @@ swift run
 ### Opsi 2: Create Xcode Project
 
 ```bash
-cd /Users/sheenazien8/Documents/Code/my-project/OpenClawMenuBar
+cd /Users/sheenazien8/Documents/Code/my-project/ClawMac
 swift package generate-xcodeproj
-open OpenClawMenuBar.xcodeproj
+open ClawMac.xcodeproj
 ```
 
 Lalu **Cmd+R** di Xcode.
@@ -36,9 +36,9 @@ Lalu **Cmd+R** di Xcode.
 ## Struktur Project
 
 ```
-OpenClawMenuBar/
+ClawMac/
 ├── Package.swift                    # Swift Package manifest
-├── OpenClawMenuBar.entitlements   # Sandbox capabilities (mic, speech)
+├── ClawMac.entitlements   # Sandbox capabilities (mic, speech)
 ├── Info.plist                     # App info + permissions
 ├── README.md                      # This file
 └── Sources/
@@ -83,7 +83,7 @@ apiClient.sendMessage(messageText) { response in
 
 **Error: "Izin mic diperlukan"**
 - Buka System Settings > Privacy & Security > Microphone
-- Pastikan OpenClawMenuBar di-allow
+- Pastikan ClawMac di-allow
 
 ## TODO
 

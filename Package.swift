@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "OpenClawMenuBar",
+    name: "ClawMac",
     platforms: [
         .macOS(.v14)
     ],
     dependencies: [],
     targets: [
         .executableTarget(
-            name: "OpenClawMenuBar",
+            name: "ClawMac",
             dependencies: [],
             path: "Sources",
             resources: [
