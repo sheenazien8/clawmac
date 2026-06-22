@@ -13,7 +13,9 @@ let package = Package(
             dependencies: [],
             path: "Sources",
             swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
+                .enableExperimentalFeature("StrictConcurrency"),
+                .define("SWIFT_PACKAGE"),
+                .unsafeFlags(["-parse-as-library"])
             ]
         )
     ]
