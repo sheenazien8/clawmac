@@ -14,16 +14,18 @@ enum MessageRole: String, Codable {
 struct Message: Identifiable, Codable, Equatable {
     let id: UUID
     let role: MessageRole
-    let content: String
+    var content: String
     let timestamp: Date
     var isProcessing: Bool
-    
-    init(id: UUID = UUID(), role: MessageRole, content: String, timestamp: Date = Date(), isProcessing: Bool = false) {
+    var progressText: String?
+
+    init(id: UUID = UUID(), role: MessageRole, content: String, timestamp: Date = Date(), isProcessing: Bool = false, progressText: String? = nil) {
         self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
         self.isProcessing = isProcessing
+        self.progressText = progressText
     }
 }
 
@@ -38,6 +40,287 @@ struct MacOSClient: Codable {
     let createdAt: Date
 }
 
+// MARK: - Streaming Helpers
+
+final class SSEClient: NSObject {
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var buffer = Data()
+    private let parseQueue = DispatchQueue(label: "com.openclaw.sse-client")
+    private var completed = false
+
+    var onEvent: ((String?, [String: Any]) -> Void)?
+    var onComplete: ((Error?) -> Void)?
+
+    func connect(url: URL, body: [String: Any]) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 0
+        config.timeoutIntervalForResource = 0
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.httpAdditionalHeaders = ["Connection": "keep-alive"]
+
+        let delegate = SSESessionDelegate(client: self)
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        self.session = session
+        let task = session.dataTask(with: request)
+        self.task = task
+        task.resume()
+        print("📡 SSEClient: connected to \(url)")
+    }
+
+    func cancel() {
+        guard !completed else { return }
+        completed = true
+        onEvent = nil
+        onComplete = nil
+        task?.cancel()
+        session?.invalidateAndCancel()
+        print("📡 SSEClient: cancelled")
+    }
+
+    fileprivate func didReceiveData(_ data: Data) {
+        parseQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.buffer.append(data)
+            self.drainEvents(flush: false)
+        }
+    }
+
+    fileprivate func didCompleteWithError(_ error: Error?) {
+        parseQueue.async { [weak self] in
+            guard let self = self, !self.completed else { return }
+            self.completed = true
+            self.drainEvents(flush: true)
+            let complete = self.onComplete
+            self.onComplete = nil
+            DispatchQueue.main.async {
+                complete?(error)
+            }
+        }
+    }
+
+    private func drainEvents(flush: Bool) {
+        let separator = Data([0x0A, 0x0A])
+        while let range = buffer.range(of: separator) {
+            let eventData = buffer.subdata(in: 0..<range.lowerBound)
+            buffer.removeSubrange(0..<range.upperBound)
+            parseEvent(eventData)
+        }
+        if flush && !buffer.isEmpty {
+            parseEvent(buffer)
+            buffer.removeAll()
+        }
+    }
+
+    private func parseEvent(_ raw: Data) {
+        guard let str = String(data: raw, encoding: .utf8) else { return }
+        var eventType: String?
+        var dataLines: [String] = []
+        for rawLine in str.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+            if line.isEmpty { continue }
+            if line.hasPrefix(":") { continue }
+            if line.hasPrefix("event:") {
+                eventType = String(line.dropFirst("event:".count))
+                    .trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("data:") {
+                dataLines.append(
+                    String(line.dropFirst("data:".count))
+                        .trimmingCharacters(in: .whitespaces)
+                )
+            }
+        }
+        guard !dataLines.isEmpty else { return }
+        let payload = dataLines.joined(separator: "\n")
+        guard let jsonData = payload.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
+        else {
+            print("⚠️ SSEClient: non-JSON event payload")
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.onEvent?(eventType, json)
+        }
+    }
+}
+
+private final class SSESessionDelegate: NSObject, URLSessionDataDelegate {
+    weak var client: SSEClient?
+    init(client: SSEClient) { self.client = client }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        client?.didReceiveData(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        client?.didCompleteWithError(error)
+    }
+}
+
+final class StreamBuffer {
+    private var data = Data()
+    private let lock = NSLock()
+
+    func append(_ chunk: Data) {
+        lock.lock(); defer { lock.unlock() }
+        data.append(chunk)
+    }
+
+    func snapshotLines() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        var lines: [String] = []
+        var current = Data()
+        for byte in data {
+            if byte == 0x0A {
+                if let line = String(data: current, encoding: .utf8), !line.isEmpty {
+                    lines.append(line)
+                }
+                current.removeAll()
+            } else {
+                current.append(byte)
+            }
+        }
+        return lines
+    }
+
+    func takeAllString() -> String {
+        lock.lock(); defer { lock.unlock() }
+        let str = String(data: data, encoding: .utf8) ?? ""
+        data.removeAll()
+        return str
+    }
+}
+
+final class SSEWriter {
+    private let connection: NWConnection
+    private let queue = DispatchQueue(label: "com.openclaw.sse-writer")
+    private var headersSent = false
+    private var closed = false
+    private var heartbeatTimer: DispatchSourceTimer?
+    private weak var process: Process?
+    var onCancel: (() -> Void)?
+
+    init(connection: NWConnection) {
+        self.connection = connection
+    }
+
+    func attachProcess(_ task: Process) {
+        process = task
+    }
+
+    func sendEvent(type: String?, data: [String: Any]) {
+        queue.async { [weak self] in
+            guard let self = self, !self.closed else { return }
+            self.ensureHeaders()
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: data),
+                  let jsonString = String(data: jsonData, encoding: .utf8) else { return }
+            var payload = ""
+            if let type = type {
+                payload += "event: \(type)\n"
+            }
+            for line in jsonString.split(separator: "\n", omittingEmptySubsequences: false) {
+                payload += "data: \(line)\n"
+            }
+            payload += "\n"
+            self.connection.send(
+                content: payload.data(using: .utf8),
+                contentContext: .defaultMessage,
+                isComplete: false,
+                completion: .contentProcessed { error in
+                    if let error = error {
+                        print("⚠️ SSE send error: \(error)")
+                    }
+                }
+            )
+        }
+    }
+
+    func sendComment(_ text: String) {
+        queue.async { [weak self] in
+            guard let self = self, !self.closed else { return }
+            self.ensureHeaders()
+            let payload = ": \(text)\n\n"
+            self.connection.send(
+                content: payload.data(using: .utf8),
+                contentContext: .defaultMessage,
+                isComplete: false,
+                completion: .contentProcessed { _ in }
+            )
+        }
+    }
+
+    func startHeartbeat(every seconds: Int) {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + .seconds(seconds), repeating: .seconds(seconds))
+        timer.setEventHandler { [weak self] in
+            self?.sendComment("heartbeat")
+        }
+        timer.resume()
+        heartbeatTimer = timer
+    }
+
+    func close() {
+        queue.async { [weak self] in
+            self?.finalize()
+        }
+    }
+
+    func cancelStream() {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            if let task = self.process, task.isRunning {
+                print("🛑 Terminating CLI process (stream cancelled)")
+                task.terminate()
+            }
+            self.finalize()
+            self.onCancel?()
+        }
+    }
+
+    private func finalize() {
+        guard !closed else { return }
+        closed = true
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
+        connection.send(
+            content: nil,
+            contentContext: .finalMessage,
+            isComplete: true,
+            completion: .contentProcessed { _ in
+                self.connection.cancel()
+            }
+        )
+    }
+
+    private func ensureHeaders() {
+        guard !headersSent else { return }
+        headersSent = true
+        let headers = [
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/event-stream",
+            "Cache-Control: no-cache",
+            "Connection: keep-alive",
+            "X-Accel-Buffering: no",
+            "Access-Control-Allow-Origin: *",
+            "",
+            ""
+        ].joined(separator: "\r\n")
+        connection.send(
+            content: headers.data(using: .utf8),
+            contentContext: .defaultMessage,
+            isComplete: false,
+            completion: .contentProcessed { _ in }
+        )
+    }
+}
+
 // MARK: - Native Bridge Server (Swift)
 class NativeBridgeServer: ObservableObject {
     @MainActor
@@ -49,6 +332,7 @@ class NativeBridgeServer: ObservableObject {
     
     private var listener: NWListener?
     private var activeConnections: [NWConnection] = []
+    private var activeStreams: [String: SSEWriter] = [:]
     private let port: UInt16 = 3456
     private let queue = DispatchQueue(label: "com.openclaw.bridge")
     
@@ -330,6 +614,8 @@ class NativeBridgeServer: ObservableObject {
             handleApprove(body: body, connection: connection)
         case ("POST", "/api/macos/chat"):
             handleChat(body: body, connection: connection)
+        case ("POST", "/api/macos/chat/stream"):
+            handleChatStream(body: body, connection: connection)
         case ("GET", "/api/macos/clients"):
             handleListClients(connection)
         case ("GET", "/api/macos/pending"):
@@ -460,18 +746,16 @@ class NativeBridgeServer: ObservableObject {
             sendResponse(connection, status: 400, body: ["error": "Missing message"])
             return
         }
-        
+
         let clientId = body["clientId"] as? String
-        
-        // Validate client
+
         if let clientId = clientId {
             guard approvedClients.contains(where: { $0.clientId == clientId }) else {
                 sendResponse(connection, status: 403, body: ["error": "Client not approved"])
                 return
             }
         }
-        
-        // Forward to Clawmac CLI
+
         print("📤 Forwarding message to Clawmac: \(message)")
         forwardToClawmac(message: message, clientId: clientId) { responseText in
             print("📥 Clawmac response received: \(responseText?.prefix(100) ?? "nil")...")
@@ -481,6 +765,51 @@ class NativeBridgeServer: ObservableObject {
             ]
             self.sendResponse(connection, status: 200, body: response)
         }
+    }
+
+    private func handleChatStream(body: [String: Any], connection: NWConnection) {
+        guard let message = body["message"] as? String else {
+            sendResponse(connection, status: 400, body: ["error": "Missing message"])
+            return
+        }
+
+        let clientId = body["clientId"] as? String
+
+        if let clientId = clientId {
+            guard approvedClients.contains(where: { $0.clientId == clientId }) else {
+                sendResponse(connection, status: 403, body: ["error": "Client not approved"])
+                return
+            }
+        }
+
+        print("📡 Streaming chat for: \(message.prefix(80))")
+
+        let sse = SSEWriter(connection: connection)
+        let streamId = UUID().uuidString
+        activeStreams[streamId] = sse
+
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .cancelled:
+                print("🔌 SSE client disconnected, killing stream \(streamId)")
+                self.activeStreams.removeValue(forKey: streamId)
+                sse.cancelStream()
+            case .failed(let error):
+                print("❌ SSE connection failed: \(error)")
+                self.activeConnections.removeAll { $0 === connection }
+                self.activeStreams.removeValue(forKey: streamId)
+                sse.cancelStream()
+            default:
+                break
+            }
+        }
+
+        sse.onCancel = { [weak self] in
+            self?.activeStreams.removeValue(forKey: streamId)
+        }
+
+        forwardToClawmacStreaming(message: message, clientId: clientId, sse: sse)
     }
     
     private func forwardToClawmac(message: String, clientId: String?, completion: @escaping (String?) -> Void) {
@@ -496,27 +825,27 @@ class NativeBridgeServer: ObservableObject {
             completion(nil)
             return
         }
-        
+
         print("🤖 Calling Clawmac with sessionKey: \(sessionKey)")
-        
+
         // Call Clawmac CLI
         let task = Process()
         task.launchPath = "/Users/sheenazien8/.nvm/versions/node/v22.19.0/bin/openclaw"
         task.arguments = ["agent", "--session-key", sessionKey, "-m", message, "--json"]
-        
+
         let pipe = Pipe()
         let errorPipe = Pipe()
         task.standardOutput = pipe
         task.standardError = errorPipe
-        
+
         task.terminationHandler = { process in
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            
+
             if let errorOutput = String(data: errorData, encoding: .utf8), !errorOutput.isEmpty {
                 print("⚠️ Clawmac stderr: \(errorOutput)")
             }
-            
+
             if let output = String(data: data, encoding: .utf8) {
                 print("✅ Clawmac response length: \(output.count)")
                 completion(output)
@@ -525,12 +854,150 @@ class NativeBridgeServer: ObservableObject {
                 completion(nil)
             }
         }
-        
+
         do {
             try task.run()
         } catch {
             print("❌ Clawmac execution error: \(error)")
             completion(nil)
+        }
+    }
+
+    private func forwardToClawmacStreaming(
+        message: String,
+        clientId: String?,
+        sse: SSEWriter
+    ) {
+        let sessionKey: String
+        if let clientId = clientId,
+           let client = approvedClients.first(where: { $0.clientId == clientId }) {
+            sessionKey = client.sessionKey
+        } else if let defaultClient = approvedClients.first {
+            sessionKey = defaultClient.sessionKey
+        } else {
+            sse.sendEvent(type: "error", data: ["message": "No approved clients"])
+            sse.close()
+            return
+        }
+
+        print("🤖 Streaming call to Clawmac with sessionKey: \(sessionKey)")
+
+        sse.sendEvent(type: "started", data: [
+            "sessionKey": sessionKey,
+            "startedAt": Date().timeIntervalSince1970
+        ])
+
+        let task = Process()
+        task.launchPath = "/Users/sheenazien8/.nvm/versions/node/v22.19.0/bin/openclaw"
+        task.arguments = ["agent", "--session-key", sessionKey, "-m", message, "--json"]
+
+        let pipe = Pipe()
+        let errorPipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = errorPipe
+
+        let buffer = StreamBuffer()
+        let stdoutHandle = pipe.fileHandleForReading
+        let stderrHandle = errorPipe.fileHandleForReading
+
+        sse.attachProcess(task)
+
+        stdoutHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            buffer.append(data)
+            for line in buffer.snapshotLines() {
+                sse.sendEvent(type: "stdout", data: ["line": line])
+            }
+        }
+
+        stderrHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
+                print("⚠️ stderr: \(str.prefix(200))")
+            }
+        }
+
+        task.terminationHandler = { process in
+            stdoutHandle.readabilityHandler = nil
+            stderrHandle.readabilityHandler = nil
+
+            let remaining = stdoutHandle.readDataToEndOfFile()
+            if !remaining.isEmpty {
+                buffer.append(remaining)
+            }
+            let errorRemaining = stderrHandle.readDataToEndOfFile()
+            if let errorString = String(data: errorRemaining, encoding: .utf8), !errorString.isEmpty {
+                print("⚠️ stderr tail: \(errorString.prefix(200))")
+            }
+
+            let exitCode = process.terminationStatus
+            let fullOutput = buffer.takeAllString()
+
+            if exitCode != 0 && fullOutput.isEmpty {
+                sse.sendEvent(type: "error", data: [
+                    "message": "CLI exited with code \(exitCode)"
+                ])
+                sse.close()
+                return
+            }
+
+            var textContent = ""
+            var meta: [String: Any] = [:]
+            if let jsonData = fullOutput.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                if let result = json["result"] as? [String: Any],
+                   let payloads = result["payloads"] as? [[String: Any]],
+                   let firstPayload = payloads.first,
+                   let text = firstPayload["text"] as? String {
+                    textContent = text
+                }
+                if let summary = json["summary"] as? String {
+                    meta["summary"] = summary
+                }
+                if let runId = json["runId"] as? String {
+                    meta["runId"] = runId
+                }
+                if let result = json["result"] as? [String: Any],
+                   let innerMeta = result["meta"] as? [String: Any] {
+                    if let duration = innerMeta["durationMs"] as? Int {
+                        meta["durationMs"] = duration
+                    }
+                }
+            } else {
+                textContent = fullOutput
+            }
+
+            if !textContent.isEmpty {
+                sse.sendEvent(type: "text", data: ["content": textContent])
+            }
+
+            sse.sendEvent(type: "done", data: [
+                "success": true,
+                "response": fullOutput,
+                "text": textContent,
+                "exitCode": exitCode,
+                "meta": meta
+            ])
+
+            sse.close()
+        }
+
+        do {
+            try task.run()
+            sse.startHeartbeat(every: 15)
+        } catch {
+            sse.sendEvent(type: "error", data: [
+                "message": "Failed to spawn CLI: \(error.localizedDescription)"
+            ])
+            sse.close()
         }
     }
     
@@ -761,11 +1228,18 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
     @Published var isLoading: Bool = false
     @Published var recordingStatus: String = ""
     @Published var connectionStatus: String = ""
-    
+    @Published var elapsedTime: TimeInterval = 0
+
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
+
+    private var activeStream: SSEClient?
+    private var typewriterTimer: Timer?
+    private var pendingTextBuffer: String = ""
+    private var processingStartedAt: Date?
+    private var elapsedTimer: Timer?
     
     override init() {
         super.init()
@@ -785,121 +1259,179 @@ class ChatViewModel: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
     
     func sendMessage(clientId: String?) {
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        
+
         let userMessage = Message(role: .user, content: inputText)
         messages.append(userMessage)
-        
+
         let messageText = inputText
         inputText = ""
         isLoading = true
-        
+
+        // Cancel any in-flight request before starting a new one
+        activeStream?.cancel()
+        activeStream = nil
+        typewriterTimer?.invalidate()
+        typewriterTimer = nil
+
         let processingMessage = Message(role: .assistant, content: "", isProcessing: true)
         messages.append(processingMessage)
-        
-        // Send to local bridge
-        let url = URL(string: "http://localhost:3456/api/macos/chat")!
+        processingStartedAt = Date()
+
         var body: [String: Any] = ["message": messageText]
         if let clientId = clientId {
             body["clientId"] = clientId
         }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 60
-        
-        guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
-            print("❌ Failed to serialize body")
-            self.messages.removeLast()
-            self.messages.append(Message(role: .assistant, content: "Failed to create request"))
-            self.isLoading = false
+
+        let streamUrl = URL(string: "http://localhost:3456/api/macos/chat/stream")!
+        print("📤 ChatViewModel.sendMessage - Streaming to: \(streamUrl)")
+
+        let client = SSEClient()
+        activeStream = client
+
+        client.onEvent = { [weak self] eventType, payload in
+            self?.handleStreamEvent(eventType: eventType, payload: payload)
+        }
+        client.onComplete = { [weak self] error in
+            self?.handleStreamComplete(error: error)
+        }
+        client.connect(url: streamUrl, body: body)
+    }
+
+    private func handleStreamEvent(eventType: String?, payload: [String: Any]) {
+        guard let index = messages.lastIndex(where: { $0.isProcessing }) else { return }
+
+        if eventType != nil {
+            startElapsedTimer()
+        }
+
+        switch eventType {
+        case "started":
+            messages[index].progressText = "🤔 Thinking..."
+        case "text":
+            if let chunk = payload["content"] as? String, !chunk.isEmpty {
+                appendTextChunk(chunk, at: index)
+            }
+        case "tool":
+            if let name = payload["name"] as? String {
+                messages[index].progressText = "🔧 Running \(name)..."
+            }
+        case "thinking":
+            if let text = payload["text"] as? String {
+                messages[index].progressText = "💭 \(text.prefix(80))"
+            }
+        case "error":
+            if let message = payload["message"] as? String {
+                messages[index].progressText = nil
+                messages[index].content += "\n\n⚠️ \(message)"
+                messages[index].isProcessing = false
+                isLoading = false
+                typewriterTimer?.invalidate()
+                typewriterTimer = nil
+                pendingTextBuffer.removeAll()
+                stopElapsedTimer()
+            }
+        case "done":
+            messages[index].isProcessing = false
+            messages[index].progressText = nil
+            if let text = payload["text"] as? String, !text.isEmpty, messages[index].content.isEmpty {
+                messages[index].content = text
+            }
+            isLoading = false
+            typewriterTimer?.invalidate()
+            typewriterTimer = nil
+            pendingTextBuffer.removeAll()
+            stopElapsedTimer()
+        default:
+            if let chunk = payload["content"] as? String {
+                appendTextChunk(chunk, at: index)
+            }
+        }
+    }
+
+    private func handleStreamComplete(error: Error?) {
+        guard let index = messages.lastIndex(where: { $0.isProcessing }) else {
+            isLoading = false
+            stopElapsedTimer()
             return
         }
-        request.httpBody = httpBody
-        
-        print("📤 ChatViewModel.sendMessage - Sending to: \(url)")
-        print("📤 Headers: Content-Type=application/json")
-        print("📤 Body: \(body)")
-        print("📤 Body size: \(httpBody.count) bytes")
-        
-        // Use ephemeral session to avoid caching issues
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 120
-        // Disable automatic cursor change
-        config.waitsForConnectivity = false
-        let session = URLSession(configuration: config)
-        
-        // Run on background thread to avoid blocking UI
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let task = session.dataTask(with: request) { [weak self] data, response, error in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                
-                print("📥 ChatViewModel.sendMessage - Response received")
-                print("📥 error: \(String(describing: error))")
-                print("📥 HTTP response: \(String(describing: response))")
-                print("📥 data: \(data != nil ? "\(data!.count) bytes" : "nil")")
-                
-                if let lastMessage = self.messages.last, lastMessage.isProcessing {
-                    self.messages.removeLast()
-                }
-                
-                if let error = error {
-                    print("❌ Network error: \(error.localizedDescription)")
-                    self.messages.append(Message(role: .assistant, content: "Error: \(error.localizedDescription)"))
-                    self.isLoading = false
-                    return
-                }
-                
-                guard let data = data else {
-                    print("❌ No data received")
-                    self.messages.append(Message(role: .assistant, content: "No data"))
-                    self.isLoading = false
-                    return
-                }
-                
-                // Try to parse JSON
-                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    let rawString = String(data: data, encoding: .utf8) ?? "invalid"
-                    print("❌ Failed to parse JSON. Raw: \(rawString.prefix(200))")
-                    self.messages.append(Message(role: .assistant, content: "Invalid JSON response"))
-                    self.isLoading = false
-                    return
-                }
-                
-                guard let responseJsonString = json["response"] as? String else {
-                    print("❌ No 'response' field in JSON: \(json.keys)")
-                    self.messages.append(Message(role: .assistant, content: "No response field"))
-                    self.isLoading = false
-                    return
-                }
-                
-                print("📥 response field length: \(responseJsonString.count)")
-                
-                // Parse the nested JSON response from Clawmac CLI
-                let finalText: String
-                if let responseData = responseJsonString.data(using: .utf8),
-                   let responseJson = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                   let result = responseJson["result"] as? [String: Any],
-                   let payloads = result["payloads"] as? [[String: Any]],
-                   let firstPayload = payloads.first,
-                   let text = firstPayload["text"] as? String {
-                    finalText = text
-                    print("✅ Parsed text: \(text)")
-                } else {
-                    // Fallback: just show the raw response
-                    finalText = responseJsonString.prefix(500) + "..."
-                    print("⚠️ Fallback to raw response")
-                }
-                
-                self.messages.append(Message(role: .assistant, content: finalText))
-                self.isLoading = false
+        if let error = error {
+            print("❌ SSE stream error: \(error.localizedDescription)")
+            if messages[index].content.isEmpty {
+                messages[index].content = "Error: \(error.localizedDescription)"
+            } else {
+                messages[index].content += "\n\n⚠️ Connection lost: \(error.localizedDescription)"
             }
-            }
-            task.resume()
+            messages[index].isProcessing = false
+            messages[index].progressText = nil
         }
+        isLoading = false
+        stopElapsedTimer()
+        activeStream = nil
+        typewriterTimer?.invalidate()
+        typewriterTimer = nil
+    }
+
+    private func startElapsedTimer() {
+        guard elapsedTimer == nil else { return }
+        processingStartedAt = Date()
+        elapsedTime = 0
+        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self, let started = self.processingStartedAt else { return }
+            self.elapsedTime = Date().timeIntervalSince(started)
+        }
+    }
+
+    private func stopElapsedTimer() {
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+    }
+
+    private func appendTextChunk(_ chunk: String, at index: Int) {
+        guard index < messages.count else { return }
+        pendingTextBuffer.append(chunk)
+        if typewriterTimer == nil {
+            typewriterTimer = Timer.scheduledTimer(withTimeInterval: 0.015, repeats: true) { [weak self] timer in
+                self?.drainTypewriter(timer: timer)
+            }
+        }
+    }
+
+    private func drainTypewriter(timer: Timer) {
+        guard let index = messages.lastIndex(where: { $0.isProcessing }) else {
+            timer.invalidate()
+            typewriterTimer = nil
+            pendingTextBuffer.removeAll()
+            return
+        }
+        let charsPerTick = 3
+        guard !pendingTextBuffer.isEmpty else { return }
+        var drained = ""
+        var count = 0
+        for char in pendingTextBuffer {
+            if count >= charsPerTick { break }
+            drained.append(char)
+            count += 1
+        }
+        pendingTextBuffer.removeFirst(drained.count)
+        messages[index].content += drained
+        if pendingTextBuffer.isEmpty {
+            timer.invalidate()
+            typewriterTimer = nil
+        }
+    }
+
+    func cancelActiveStream() {
+        activeStream?.cancel()
+        activeStream = nil
+        typewriterTimer?.invalidate()
+        typewriterTimer = nil
+        pendingTextBuffer.removeAll()
+        if let index = messages.lastIndex(where: { $0.isProcessing }) {
+            messages[index].isProcessing = false
+            messages[index].progressText = nil
+        }
+        isLoading = false
+        stopElapsedTimer()
     }
     
     func clearChat() {
@@ -1025,7 +1557,10 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(viewModel.messages) { message in
-                        MessageBubble(message: message)
+                        MessageBubble(
+                            message: message,
+                            elapsedTime: message.isProcessing ? viewModel.elapsedTime : 0
+                        )
                     }
                 }
                 .padding()
@@ -1106,15 +1641,24 @@ struct ChatView: View {
 
 struct MessageBubble: View {
     let message: Message
-    
+    let elapsedTime: TimeInterval
+
     var body: some View {
         HStack {
             if message.role == .user {
                 Spacer()
             }
-            
-            if message.isProcessing {
-                TypingIndicator()
+
+            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
+                if message.isProcessing && message.content.isEmpty {
+                    HStack(spacing: 8) {
+                        TypingIndicator()
+                        if !elapsedTimeText.isEmpty {
+                            Text(elapsedTimeText)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(Color(.windowBackgroundColor))
@@ -1123,26 +1667,80 @@ struct MessageBubble: View {
                         RoundedRectangle(cornerRadius: 14)
                             .stroke(Color.gray.opacity(0.2), lineWidth: 1)
                     )
-            } else {
-                Text(message.content)
-                    .font(.system(size: 14))
-                    .foregroundColor(message.role == .user ? .white : .primary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14)
-                            .fill(message.role == .user ? Color.blue : Color(.windowBackgroundColor))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14)
-                            .stroke(message.role == .user ? Color.clear : Color.gray.opacity(0.2), lineWidth: 1)
-                    )
+                } else {
+                    contentBubble
+                }
+
+                if message.isProcessing, let progress = message.progressText, !progress.isEmpty {
+                    HStack(spacing: 6) {
+                        Text(progress)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        if !elapsedTimeText.isEmpty {
+                            Text("·")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text(elapsedTimeText)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
             }
-            
+
             if message.role == .assistant {
                 Spacer()
             }
         }
+    }
+
+    private var elapsedTimeText: String {
+        guard elapsedTime > 0 else { return "" }
+        if elapsedTime < 60 { return String(format: "%.1fs", elapsedTime) }
+        let m = Int(elapsedTime) / 60
+        let s = Int(elapsedTime) % 60
+        return String(format: "%dm %02ds", m, s)
+    }
+
+    @ViewBuilder
+    private var contentBubble: some View {
+        HStack(alignment: .bottom, spacing: 4) {
+            Text(message.content)
+                .font(.system(size: 14))
+                .foregroundColor(message.role == .user ? .white : .primary)
+                .textSelection(.enabled)
+            if message.isProcessing {
+                BlinkingCaret()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(message.role == .user ? Color.blue : Color(.windowBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(message.role == .user ? Color.clear : Color.gray.opacity(0.2), lineWidth: 1)
+        )
+    }
+}
+
+struct BlinkingCaret: View {
+    @State private var on = true
+    var body: some View {
+        Rectangle()
+            .fill(Color.secondary)
+            .frame(width: 2, height: 14)
+            .opacity(on ? 1 : 0.2)
+            .animation(.easeInOut(duration: 0.5), value: on)
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    on.toggle()
+                }
+            }
     }
 }
 
@@ -1353,19 +1951,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func handleAppWillResignActive() {
         if popover?.isShown == true {
+            chatViewModel.cancelActiveStream()
             popover?.performClose(nil)
         }
     }
 
     func applicationWillResignActive(_ notification: Notification) {
         if popover?.isShown == true {
+            chatViewModel.cancelActiveStream()
             popover?.performClose(nil)
         }
     }
-    
+
     @objc func togglePopover() {
         if let button = statusItem?.button {
             if popover?.isShown == true {
+                chatViewModel.cancelActiveStream()
                 popover?.performClose(nil)
             } else {
                 NSApp.activate(ignoringOtherApps: true)
