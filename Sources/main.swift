@@ -1226,11 +1226,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         // Create popover
-        let enhancedChatView = EnhancedChatView(viewModel: chatViewModel, pairingManager: pairingManager)
+        let chatView = ChatView(viewModel: chatViewModel, pairingManager: pairingManager)
         popover = NSPopover()
-        popover?.contentSize = NSSize(width: 400, height: 650)
+        popover?.contentSize = NSSize(width: 380, height: 600)
         popover?.behavior = .transient
-        popover?.contentViewController = NSHostingController(rootView: enhancedChatView)
+        popover?.contentViewController = NSHostingController(rootView: chatView)
     }
     
     @objc func togglePopover() {
@@ -1240,6 +1240,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             }
+        }
+    }
+}
+
+@main
+struct OpenClawMenuBarApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    
+    var body: some Scene {
+        Settings {
+            EmptyView()
         }
     }
 }
