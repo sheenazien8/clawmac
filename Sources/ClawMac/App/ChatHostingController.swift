@@ -4,24 +4,30 @@ import SwiftUI
 final class ChatHostingController: NSHostingController<ChatView> {
     override func viewDidAppear() {
         super.viewDidAppear()
+        Self.focusFirstTextField(in: view)
+    }
 
+    static func focusFirstTextField(in view: NSView, maxAttempts: Int = 8) {
         guard let window = view.window else { return }
         window.makeKey()
 
         func attemptFocus(attempt: Int) {
-            guard attempt < 5 else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1 * Double(attempt + 1)) { [weak self] in
-                guard let self = self, let window = self.view.window, window.isVisible else { return }
+            guard attempt < maxAttempts else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05 + 0.1 * Double(attempt)) {
+                guard let window = view.window, window.isVisible else { return }
                 window.makeKey()
-                if let textField = Self.findTextField(in: self.view) {
+                if let textField = findTextField(in: view) {
                     if window.makeFirstResponder(textField) {
                         print("✅ Autofocus succeeded on attempt \(attempt + 1)")
                     } else {
                         print("⚠️ makeFirstResponder returned false on attempt \(attempt + 1)")
+                        if attempt < maxAttempts - 1 {
+                            attemptFocus(attempt: attempt + 1)
+                        }
                     }
                 } else {
                     print("⚠️ NSTextField not found on attempt \(attempt + 1)")
-                    if attempt < 4 {
+                    if attempt < maxAttempts - 1 {
                         attemptFocus(attempt: attempt + 1)
                     }
                 }

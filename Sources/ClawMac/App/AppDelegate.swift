@@ -15,6 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var aboutWindowController: AboutWindowController?
     private var statusItemMenu: NSMenu?
     private var settingsCancellable: AnyCancellable?
+    private var streamingIndicatorCancellable: AnyCancellable?
     private var lastRegisteredKeyCode: UInt32 = UInt32.max
     private var lastRegisteredModifiers: UInt32 = UInt32.max
 
@@ -44,11 +45,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover?.behavior = .transient
         popover?.contentViewController = ChatHostingController(rootView: chatView)
 
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePopoverDidShow(_:)),
+            name: NSPopover.didShowNotification,
+            object: popover
+        )
+
         settingsCancellable = settingsStore.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.reregisterHotKeyIfNeeded()
+                }
+            }
+
+        streamingIndicatorCancellable = chatViewModel.$isLoading
+            .receive(on: RunLoop.main)
+            .sink { [weak self] isLoading in
+                DispatchQueue.main.async {
+                    self?.updateStreamingIndicator(isLoading: isLoading)
                 }
             }
 
@@ -119,14 +135,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func handleAppWillResignActive() {
         if popover?.isShown == true {
-            chatViewModel.cancelActiveStream()
             popover?.performClose(nil)
         }
     }
 
     func applicationWillResignActive(_ notification: Notification) {
         if popover?.isShown == true {
-            chatViewModel.cancelActiveStream()
             popover?.performClose(nil)
         }
     }
@@ -134,12 +148,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func togglePopover() {
         if let button = statusItem?.button {
             if popover?.isShown == true {
-                chatViewModel.cancelActiveStream()
                 popover?.performClose(nil)
             } else {
                 NSApp.activate(ignoringOtherApps: true)
                 popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             }
+        }
+    }
+
+    private func updateStreamingIndicator(isLoading: Bool) {
+        guard let button = statusItem?.button else { return }
+        button.contentTintColor = isLoading ? .systemRed : nil
+    }
+
+    @objc private func handlePopoverDidShow(_ notification: Notification) {
+        guard let view = popover?.contentViewController?.view else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak view] in
+            guard let view = view else { return }
+            ChatHostingController.focusFirstTextField(in: view)
         }
     }
 
