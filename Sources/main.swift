@@ -3,6 +3,7 @@ import SwiftUI
 import Speech
 import AVFoundation
 import Network
+import Combine
 
 // MARK: - Models
 enum MessageRole: String, Codable {
@@ -1867,6 +1868,507 @@ struct StartPairingView: View {
     }
 }
 
+// MARK: - Global Hot Key & Settings
+
+import Carbon.HIToolbox
+
+private let kHotKeySignature: OSType = 0x636C6177 // 'claw'
+
+private let hotKeyCallback: EventHandlerUPP = { (_, _, userData) -> OSStatus in
+    guard let userData = userData else { return noErr }
+    let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+    MainActor.assumeIsolated {
+        manager.fire()
+    }
+    return noErr
+}
+
+extension NSEvent.ModifierFlags {
+    var carbonModifiers: UInt32 {
+        var carbon: UInt32 = 0
+        if contains(.command) { carbon |= UInt32(cmdKey) }
+        if contains(.shift) { carbon |= UInt32(shiftKey) }
+        if contains(.option) { carbon |= UInt32(optionKey) }
+        if contains(.control) { carbon |= UInt32(controlKey) }
+        return carbon
+    }
+}
+
+enum HotKeyRegistrationResult {
+    case success
+    case permissionDenied
+    case alreadyTaken
+    case failed(OSStatus)
+}
+
+enum ShortcutFormatter {
+    private static let keyCodeToString: [UInt16: String] = [
+        0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
+        8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
+        16: "Y", 17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6",
+        23: "5", 24: "=", 25: "9", 26: "7", 27: "-", 28: "8", 29: "0",
+        30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P",
+        37: "L", 38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",",
+        44: "N", 45: "M", 46: ".", 47: "/", 50: "`",
+        36: "Return", 48: "Tab", 49: "Space", 51: "Delete", 53: "Esc",
+        115: "Home", 116: "PgUp", 117: "Fwd Del", 119: "End",
+        121: "PgDn", 114: "Help",
+        122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6",
+        98: "F7", 100: "F8", 101: "F9", 109: "F10", 103: "F11", 111: "F12",
+        123: "←", 124: "→", 125: "↓", 126: "↑",
+        65: "Num .", 67: "Num *", 69: "Num +", 71: "Num Clear",
+        75: "Num /", 76: "Num Enter", 78: "Num -", 81: "Num =",
+        82: "Num 0", 83: "Num 1", 84: "Num 2", 85: "Num 3",
+        86: "Num 4", 87: "Num 5", 88: "Num 6", 89: "Num 7",
+        91: "Num 8", 92: "Num 9"
+    ]
+
+    static func format(keyCode: Int, modifiers: UInt32) -> String {
+        var s = ""
+        if modifiers & UInt32(controlKey) != 0 { s += "⌃" }
+        if modifiers & UInt32(optionKey) != 0 { s += "⌥" }
+        if modifiers & UInt32(shiftKey) != 0 { s += "⇧" }
+        if modifiers & UInt32(cmdKey) != 0 { s += "⌘" }
+        s += keyCodeToString[UInt16(keyCode)] ?? "Key \(keyCode)"
+        return s
+    }
+}
+
+@MainActor
+final class SettingsStore: ObservableObject {
+    static let shared = SettingsStore()
+
+    @Published var shortcutKeyCode: UInt32
+    @Published var shortcutModifiers: UInt32
+    @Published var lastErrorMessage: String?
+    @Published var needsPermissionAlert: Bool = false
+
+    private let defaults = UserDefaults.standard
+    private let keyCodeKey = "globalShortcutKeyCode"
+    private let modifiersKey = "globalShortcutModifiers"
+
+    static let defaultKeyCode: UInt32 = 47
+    static let defaultModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+
+    init() {
+        if defaults.object(forKey: keyCodeKey) != nil {
+            var savedKey = UInt32(defaults.integer(forKey: keyCodeKey))
+            var savedMods = UInt32(defaults.integer(forKey: modifiersKey))
+            // Migrate: if saved is the old default (Space + cmd|shift), use new default (Period + cmd|shift)
+            if savedKey == 49, savedMods == UInt32(cmdKey | shiftKey) {
+                savedKey = Self.defaultKeyCode
+                savedMods = Self.defaultModifiers
+                defaults.set(Int(savedKey), forKey: keyCodeKey)
+                defaults.set(Int(savedMods), forKey: modifiersKey)
+                defaults.synchronize()
+            }
+            self.shortcutKeyCode = savedKey
+            self.shortcutModifiers = savedMods
+        } else {
+            self.shortcutKeyCode = Self.defaultKeyCode
+            self.shortcutModifiers = Self.defaultModifiers
+            defaults.set(Int(Self.defaultKeyCode), forKey: keyCodeKey)
+            defaults.set(Int(Self.defaultModifiers), forKey: modifiersKey)
+            defaults.synchronize()
+        }
+    }
+
+    func setShortcut(keyCode: UInt32, modifiers: UInt32) {
+        shortcutKeyCode = keyCode
+        shortcutModifiers = modifiers
+        defaults.set(Int(keyCode), forKey: keyCodeKey)
+        defaults.set(Int(modifiers), forKey: modifiersKey)
+    }
+
+    func resetToDefault() {
+        setShortcut(keyCode: Self.defaultKeyCode, modifiers: Self.defaultModifiers)
+    }
+}
+
+@MainActor
+final class HotKeyManager {
+    nonisolated(unsafe) private var hotKeyRef: EventHotKeyRef?
+    nonisolated(unsafe) private var eventHandler: EventHandlerRef?
+    private let hotKeyID = EventHotKeyID(signature: kHotKeySignature, id: 1)
+    private var trigger: (() -> Void)?
+
+    deinit {
+        if let ref = hotKeyRef {
+            UnregisterEventHotKey(ref)
+        }
+        if let handler = eventHandler {
+            RemoveEventHandler(handler)
+        }
+    }
+
+    func register(keyCode: UInt32, modifiers: UInt32, onTrigger: @escaping @MainActor () -> Void) -> HotKeyRegistrationResult {
+        unregister()
+
+        guard CGRequestListenEventAccess() else {
+            return .permissionDenied
+        }
+
+        trigger = onTrigger
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+
+        let userDataPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        let installStatus = withUnsafePointer(to: &eventType) { ptr -> OSStatus in
+            InstallEventHandler(
+                GetEventDispatcherTarget(),
+                hotKeyCallback,
+                1,
+                ptr,
+                userDataPtr,
+                &eventHandler
+            )
+        }
+
+        guard installStatus == noErr else {
+            print("⚠️ HotKeyManager: failed to install event handler (\(installStatus))")
+            return .failed(installStatus)
+        }
+
+        var ref: EventHotKeyRef?
+        let regStatus = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            hotKeyID,
+            GetEventDispatcherTarget(),
+            0,
+            &ref
+        )
+
+        guard regStatus == noErr else {
+            print("⚠️ HotKeyManager: failed to register hot key (\(regStatus))")
+            if let handler = eventHandler {
+                RemoveEventHandler(handler)
+                eventHandler = nil
+            }
+            if regStatus == OSStatus(eventHotKeyExistsErr) {
+                return .alreadyTaken
+            }
+            return .failed(regStatus)
+        }
+
+        hotKeyRef = ref
+        print("✅ HotKeyManager: registered keyCode=\(keyCode) modifiers=\(modifiers)")
+        return .success
+    }
+
+    func unregister() {
+        if let ref = hotKeyRef {
+            UnregisterEventHotKey(ref)
+            hotKeyRef = nil
+        }
+        if let handler = eventHandler {
+            RemoveEventHandler(handler)
+            eventHandler = nil
+        }
+        trigger = nil
+    }
+
+    fileprivate func fire() {
+        trigger?()
+    }
+}
+
+final class ShortcutRecorderModel: ObservableObject {
+    @Published var isRecording: Bool = false
+    private var monitor: Any?
+    var onCapture: ((Int, UInt32) -> Void)?
+    var onCancel: (() -> Void)?
+
+    private static let modifierKeyCodes: Set<UInt16> = [
+        54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+    ]
+
+    func startMonitoring() {
+        stopMonitoring()
+        isRecording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handle(event: event)
+            return nil
+        }
+    }
+
+    func stopMonitoring() {
+        if let m = monitor {
+            NSEvent.removeMonitor(m)
+            monitor = nil
+        }
+        isRecording = false
+    }
+
+    private func handle(event: NSEvent) {
+        if event.keyCode == 53 {
+            stopMonitoring()
+            onCancel?()
+            return
+        }
+        if Self.modifierKeyCodes.contains(event.keyCode) {
+            return
+        }
+        let mods = event.modifierFlags.carbonModifiers
+        let kc = Int(event.keyCode)
+        stopMonitoring()
+        onCapture?(kc, mods)
+    }
+
+    deinit {
+        if let m = monitor {
+            NSEvent.removeMonitor(m)
+        }
+    }
+}
+
+@MainActor
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    init(settingsStore: SettingsStore) {
+        NSApp.setActivationPolicy(.regular)
+        let view = SettingsView(settingsStore: settingsStore)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Clawmac Settings"
+        window.contentViewController = NSHostingController(rootView: view)
+        window.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
+        window.hidesOnDeactivate = false
+        window.acceptsMouseMovedEvents = true
+        window.center()
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        window.delegate = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeKey()
+        DispatchQueue.main.async {
+            self.window?.makeKey()
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+}
+
+@MainActor
+final class AboutWindowController: NSWindowController, NSWindowDelegate {
+    init() {
+        NSApp.setActivationPolicy(.regular)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 360),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "About Clawmac"
+        window.contentViewController = NSHostingController(rootView: AboutView())
+        window.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
+        window.hidesOnDeactivate = false
+        window.acceptsMouseMovedEvents = true
+        window.center()
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        window.delegate = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeKey()
+        DispatchQueue.main.async {
+            self.window?.makeKey()
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var settingsStore: SettingsStore
+
+    @StateObject private var recorder = ShortcutRecorderModel()
+    @State private var permissionAlertShown = Bool(false)
+
+    var body: some View {
+        Form {
+            Section("Shortcut") {
+                shortcutButton
+                Button("Reset to Default") {
+                    settingsStore.resetToDefault()
+                }
+                .buttonStyle(.link)
+
+                if let error = settingsStore.lastErrorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+
+            Section("App") {
+                LabeledContent("Name", value: "Clawmac")
+                LabeledContent("Version", value: appVersion)
+                LabeledContent("Build", value: appBuild)
+                Text("AI Assistant macOS app from the menu bar.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Button("Quit Clawmac", role: .destructive) {
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 480, height: 380)
+        .alert("Input Monitoring Required", isPresented: $permissionAlertShown) {
+            Button("Open System Settings") {
+                openInputMonitoringSettings()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Clawmac needs the Input Monitoring permission to register the global shortcut. Open System Settings → Privacy & Security → Input Monitoring and enable Clawmac.")
+        }
+        .onChange(of: settingsStore.needsPermissionAlert) { _, newValue in
+            if newValue {
+                permissionAlertShown = true
+                settingsStore.needsPermissionAlert = false
+            }
+        }
+    }
+
+    private var shortcutButton: some View {
+        Button {
+            if recorder.isRecording {
+                recorder.stopMonitoring()
+            } else {
+                recorder.onCapture = { kc, mods in
+                    settingsStore.setShortcut(keyCode: UInt32(kc), modifiers: mods)
+                }
+                recorder.onCancel = {}
+                recorder.startMonitoring()
+            }
+        } label: {
+            HStack {
+                if recorder.isRecording {
+                    Text("Press a key combo…")
+                        .foregroundColor(.accentColor)
+                    Spacer()
+                    Text("Esc to cancel")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text(ShortcutFormatter.format(
+                        keyCode: Int(settingsStore.shortcutKeyCode),
+                        modifiers: settingsStore.shortcutModifiers
+                    ))
+                    .font(.system(.body, design: .monospaced))
+                    Spacer()
+                    Text("Click to record")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func openInputMonitoringSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
+
+    private var appBuild: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+    }
+}
+
+struct AboutView: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(nsImage: appIconImage())
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 96, height: 96)
+
+            Text("Clawmac")
+                .font(.title)
+                .fontWeight(.semibold)
+
+            Text("Version \(appVersion) (\(appBuild))")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Text("AI Assistant macOS app from the menu bar.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+
+            Button("Open on GitHub") {
+                if let url = URL(string: "https://github.com/sheenazien8/clawmac/releases/latest") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .buttonStyle(.link)
+
+            Spacer()
+
+            Text("© 2026 sheenazien8")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(28)
+        .frame(width: 360, height: 360)
+    }
+
+    private func appIconImage() -> NSImage {
+        if let url = Bundle.module.url(forResource: "OpenClawLogo", withExtension: "svg"),
+           let image = NSImage(contentsOf: url) {
+            image.size = NSSize(width: 96, height: 96)
+            return image
+        }
+        if let image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil) {
+            return image
+        }
+        return NSImage()
+    }
+
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
+
+    private var appBuild: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+    }
+}
+
 // MARK: - App Delegate
 
 final class ChatHostingController: NSHostingController<ChatView> {
@@ -1908,19 +2410,29 @@ final class ChatHostingController: NSHostingController<ChatView> {
     }
 }
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popover: NSPopover?
     var chatViewModel = ChatViewModel()
     var pairingManager = PairingManager()
-    
+
+    let settingsStore = SettingsStore.shared
+    var hotKeyManager = HotKeyManager()
+    var settingsWindowController: SettingsWindowController?
+    var aboutWindowController: AboutWindowController?
+    private var statusItemMenu: NSMenu?
+    private var settingsCancellable: AnyCancellable?
+    private var lastRegisteredKeyCode: UInt32 = UInt32.max
+    private var lastRegisteredModifiers: UInt32 = UInt32.max
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Start native bridge server
         NativeBridgeServer.shared.start()
-        
+
         // Create status bar item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
+
         if let button = statusItem?.button {
             if let url = Bundle.module.url(forResource: "OpenClawLogo", withExtension: "svg"),
                let image = NSImage(contentsOf: url) {
@@ -1930,10 +2442,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 button.image = image
             }
 
-            button.action = #selector(togglePopover)
+            setupStatusItemMenu()
+            button.action = #selector(handleStatusItemClick(_:))
             button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        
+
         // Create popover
         let chatView = ChatView(viewModel: chatViewModel, pairingManager: pairingManager)
         popover = NSPopover()
@@ -1941,12 +2455,79 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover?.behavior = .transient
         popover?.contentViewController = ChatHostingController(rootView: chatView)
 
+        // Observe settings changes for live hot-key re-registration
+        settingsCancellable = settingsStore.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.reregisterHotKeyIfNeeded()
+                }
+            }
+
+        // Register the persisted (or default) hot key on launch
+        reregisterHotKeyIfNeeded(force: true)
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAppWillResignActive),
             name: NSApplication.willResignActiveNotification,
             object: nil
         )
+    }
+
+    private func setupStatusItemMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let openItem = NSMenuItem(title: "Open Chat", action: #selector(openChatFromMenu), keyEquivalent: "")
+        openItem.target = self
+        menu.addItem(openItem)
+
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettingsFromMenu), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let aboutItem = NSMenuItem(title: "About Clawmac", action: #selector(openAboutFromMenu), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(title: "Quit Clawmac", action: #selector(quitAppFromMenu), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        statusItemMenu = menu
+    }
+
+    private func reregisterHotKeyIfNeeded(force: Bool = false) {
+        let kc = settingsStore.shortcutKeyCode
+        let mods = settingsStore.shortcutModifiers
+        if !force, kc == lastRegisteredKeyCode, mods == lastRegisteredModifiers {
+            return
+        }
+        let result = hotKeyManager.register(keyCode: kc, modifiers: mods) { [weak self] in
+            self?.togglePopover()
+        }
+        lastRegisteredKeyCode = kc
+        lastRegisteredModifiers = mods
+
+        switch result {
+        case .success:
+            settingsStore.lastErrorMessage = nil
+            settingsStore.needsPermissionAlert = false
+        case .permissionDenied:
+            settingsStore.lastErrorMessage = nil
+            settingsStore.needsPermissionAlert = true
+        case .alreadyTaken:
+            settingsStore.lastErrorMessage = "Shortcut already in use by another app — try a different combo."
+            settingsStore.needsPermissionAlert = false
+        case .failed(let code):
+            settingsStore.lastErrorMessage = "Failed to register shortcut (code \(code))."
+            settingsStore.needsPermissionAlert = false
+        }
     }
 
     @objc private func handleAppWillResignActive() {
@@ -1973,6 +2554,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             }
         }
+    }
+
+    @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        let isRightClick = event?.type == .rightMouseUp
+        let isOptionClick = event?.modifierFlags.contains(.option) ?? false
+        if isRightClick || isOptionClick {
+            showStatusItemMenu()
+        } else {
+            togglePopover()
+        }
+    }
+
+    private func showStatusItemMenu() {
+        guard let menu = statusItemMenu, let statusItem = statusItem else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: (statusItem.button?.bounds.maxY ?? 0) + 4), in: statusItem.button)
+    }
+
+    @objc private func openChatFromMenu() {
+        togglePopover()
+    }
+
+    @objc private func openSettingsFromMenu() {
+        openSettingsWindow()
+    }
+
+    @objc private func openAboutFromMenu() {
+        openAboutWindow()
+    }
+
+    @objc private func quitAppFromMenu() {
+        NSApp.terminate(nil)
+    }
+
+    private func openSettingsWindow() {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(settingsStore: settingsStore)
+        }
+        settingsWindowController?.showWindow(nil)
+    }
+
+    private func openAboutWindow() {
+        if aboutWindowController == nil {
+            aboutWindowController = AboutWindowController()
+        }
+        aboutWindowController?.showWindow(nil)
     }
 }
 
